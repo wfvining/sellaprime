@@ -11,13 +11,13 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, is_prime/2]).
+-export([start_link/0, is_prime/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3, format_status/2]).
 
--record(state, {}).
+-record(state, {queue = queue:new(), worker :: pid()}).
 
 %%%===================================================================
 %%% API
@@ -35,9 +35,9 @@
 start_link() ->
     gen_server:start_link(?MODULE, [], []).
 
--spec is_prime(S :: pid(), N :: pos_integer()) -> boolean().
-is_prime(S, N) ->
-    gen_server:call(S, {is_prime, N}).
+-spec is_prime(S :: pid(), N :: pos_integer(), From :: term()) -> ok.
+is_prime(S, N, From) ->
+    gen_server:cast(S, {is_prime, {N, From}}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -56,7 +56,8 @@ is_prime(S, N) ->
           ignore.
 init([]) ->
     process_flag(trap_exit, true),
-    {ok, #state{}}.
+    Self = self(),
+    {ok, #state{worker = spawn_link(fun() -> worker(Self) end)}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -73,8 +74,13 @@ init([]) ->
           {noreply, NewState :: term(), hibernate} |
           {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
           {stop, Reason :: term(), NewState :: term()}.
-handle_call({is_prime, N}, _From, State) ->
-    {reply, lib_primes:is_prime(N), State};
+handle_call(get_work, _From, State=#state{queue=Q}) ->
+    case queue:peek(Q) of
+        empty ->
+            {reply, no_work, State};
+        {value, V} ->
+            {reply, {work, V}, State}
+    end;
 handle_call(Request, _From, State) ->
     logger:debug("Unexpected request ~p~n", [Request]),
     {reply, ok, State}.
@@ -90,8 +96,14 @@ handle_call(Request, _From, State) ->
           {noreply, NewState :: term(), Timeout :: timeout()} |
           {noreply, NewState :: term(), hibernate} |
           {stop, Reason :: term(), NewState :: term()}.
-handle_cast(_Request, State) ->
-    {noreply, State}.
+handle_cast(work_done, State=#state{queue=Q}) ->
+    {noreply, State#state{queue=queue:drop(Q)}};
+handle_cast({is_prime, Request}, State=#state{queue=Q, worker=W}) ->
+    case queue:is_empty(Q) of
+        true -> alert_worker(W);
+        false -> ok
+    end,
+    {noreply, State#state{queue=queue:in(Request, Q)}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -118,8 +130,11 @@ handle_info(_Info, State) ->
 %%--------------------------------------------------------------------
 -spec terminate(Reason :: normal | shutdown | {shutdown, term()} | term(),
                 State :: term()) -> any().
-terminate(_Reason, _State) ->
+terminate(normal, #state{worker=W}) ->
+    W ! stop;
+terminate(_, _) ->
     ok.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -150,3 +165,33 @@ format_status(_Opt, Status) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+get_work(Server) ->
+    gen_server:call(Server, get_work).
+
+work_done(Server) ->
+    gen_server:cast(Server, work_done),
+    isaprime:work_done(Server).
+
+alert_worker(W) ->
+    W ! work.
+
+worker(Server) ->
+    receive
+        work ->
+            do_work(Server),
+            worker(Server);
+        stop ->
+            ok
+    end.
+
+do_work(Server) ->
+    case get_work(Server) of
+        {work, {N, From}} ->
+            IsPrime = lib_primes:is_prime(N),
+            gen_server:reply(From, IsPrime),
+            work_done(Server),
+            do_work(Server);
+        no_work ->
+            waiting
+    end.
