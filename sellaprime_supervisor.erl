@@ -37,12 +37,12 @@ init([]) ->
         10000,
         worker,
         [prime_server]},
-       {tag3,
-        {isaprime, start_link, []},
+       {primetest_sup,
+        {primetest_sup, start_link, []},
         permanent,
-        10000,
-        worker,
-        [prime_tester_server]}
+        1000,
+        supervisor,
+        [primetest_sup]}
       ]}}.
 
 %% When the supervisor is started, it calls init(Arg).

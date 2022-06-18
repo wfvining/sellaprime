@@ -11,7 +11,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, is_prime/2]).
+-export([start_link/0, is_prime/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -30,12 +30,12 @@
 %% Starts the server
 %% @end
 %%--------------------------------------------------------------------
--spec start_link(WorkTable :: ets:tid()) -> {ok, Pid :: pid()} |
+-spec start_link() -> {ok, Pid :: pid()} |
           {error, Error :: {already_started, pid()}} |
           {error, Error :: term()} |
           ignore.
-start_link(WorkTable) ->
-    gen_server:start_link(?MODULE, WorkTable, []).
+start_link() ->
+    gen_server:start_link(?MODULE, [], []).
 
 -spec is_prime(S :: pid(), JobId :: pos_integer()) -> ok.
 is_prime(S, JobId) ->
@@ -56,8 +56,8 @@ is_prime(S, JobId) ->
           {ok, State :: term(), hibernate} |
           {stop, Reason :: term()} |
           ignore.
-init(WorkTable) ->
-    process_flag(trap_exit, true),
+init([]) ->
+    WorkTable = isaprime:register_worker(),
     Self = self(),
     {ok, #state{work_table = WorkTable,
                 worker = spawn_link(fun() -> worker(Self, WorkTable) end)}}.

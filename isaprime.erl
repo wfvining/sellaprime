@@ -2,17 +2,16 @@
 
 -behaviour(gen_server).
 
--export([start_link/0, test/1, work_done/2, get_job/2]).
+-export([start_link/0, test/1, work_done/2, get_job/2, register_worker/0]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
--define(POOLSIZE, 32).
 
--record(state, {work, next_job = 1}).
+-record(state, {work, next_job = 1, monitors = #{}}).
 
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, ?POOLSIZE, []).
+    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 test(N) ->
     gen_server:call(?SERVER, {is_prime, N}).
@@ -27,25 +26,33 @@ get_job(WorkTable, JobId) ->
     [{JobId, N, From, _}] = ets:lookup(WorkTable, JobId),
     {N, From}.
 
-init(PoolSize) ->
+register_worker() ->
+    gen_server:call(?SERVER, {register, self()}).
+
+init([]) ->
     %% Set up a table of work
     T = ets:new(work, [set, public, {write_concurrency, true}]),  % only write concurrency since reads and writes are interleaved
-    Testers = [element(2, prime_tester_server:start_link(T)) || _ <- lists:seq(1, PoolSize)],
-    % Initialize load counters for each test server
-    lists:foreach(fun(Tester) -> ets:insert(T, {Tester, 0}) end, Testers),
     {ok, #state{work = T}}.
 
+handle_call({register, Worker}, _From,
+            State = #state{ work = Work, monitors = Monitors }) ->
+    Ref = erlang:monitor(process, Worker),
+    ets:insert(Work, {Worker, 0}),
+    {reply, Work, State#state{ monitors = Monitors#{ Ref => Worker }}};
 handle_call({is_prime, N}, From, State=#state{ work = Work, next_job = JobId }) ->
-    Tester = lowest_load(Work),
-    ets:insert(Work, {JobId, N, From, Tester}),
-    prime_tester_server:is_prime(Tester, JobId),
-    increase_load(Tester, Work),
+    assign_work(JobId, N, From, Work),
     {noreply, State#state{next_job = JobId + 1}}.
 
 handle_cast(Request, State) ->
     logger:warning("Unexpected cast: ~p", [Request]),
     {noreply, State}.
 
+handle_info({'DOWN', Ref, process, _, _},
+            State = #state{ monitors = Monitors, work = Work}) ->
+    {Tester, NewMonitors} = maps:take(Ref, Monitors),
+    %% Distribute the work to other workers
+    redistribute_work(Tester, Work),
+    {noreply, State#state{monitors = NewMonitors}};
 handle_info(Info, State) ->
     logger:warning("Unnexpected info: ~p", [Info]),
     {noreply, State}.
@@ -55,6 +62,21 @@ terminate(_, _) ->
 
 code_change(_, _, State) ->
     {ok, State}.
+
+redistribute_work(Tester, Work) ->
+    ets:delete(Work, Tester),
+    WorkToReassign = ets:select(Work, [{{'$1', '$2', '$3', '$4'},
+                                        [{'=:=', Tester, '$4'}],
+                                        [{{'$1', '$2', '$3'}}]}]),
+    lists:foreach(fun({JobId, N, From}) ->
+                          assign_work(JobId, N, From, Work)
+                  end, WorkToReassign).
+
+assign_work(JobId, N, From, Work) ->
+    Tester = lowest_load(Work),
+    ets:insert(Work, {JobId, N, From, Tester}),
+    prime_tester_server:is_prime(Tester, JobId),
+    increase_load(Tester, Work).
 
 decrease_load(Tester, Work) ->
     ets:update_counter(Work, Tester, -1).
