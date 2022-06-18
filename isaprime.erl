@@ -2,14 +2,14 @@
 
 -behaviour(gen_server).
 
--export([start_link/0, test/1, work_done/1]).
+-export([start_link/0, test/1, work_done/2, get_job/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
--define(POOLSIZE, 10).
+-define(POOLSIZE, 32).
 
--record(state, {tester_load = []}).
+-record(state, {work, next_job = 1}).
 
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, ?POOLSIZE, []).
@@ -17,22 +17,34 @@ start_link() ->
 test(N) ->
     gen_server:call(?SERVER, {is_prime, N}).
 
-work_done(Tester) ->
-    gen_server:cast(?SERVER, {work_done, Tester}).
+work_done(WorkTable, JobId) ->
+    %% This could be a problem since it is not atomic, if the server
+    %% is killed externally then the load could be inconsistent.
+    ets:delete(WorkTable, JobId),
+    decrease_load(self(), WorkTable).
+
+get_job(WorkTable, JobId) ->
+    [{JobId, N, From, _}] = ets:lookup(WorkTable, JobId),
+    {N, From}.
 
 init(PoolSize) ->
-    Testers = [prime_tester_server:start_link() || _ <- lists:seq(1, PoolSize)],
-    {ok, #state{tester_load = [{Pid, 0} || {ok, Pid} <- Testers ]}}.
+    %% Set up a table of work
+    T = ets:new(work, [set, public, {write_concurrency, true}]),  % only write concurrency since reads and writes are interleaved
+    Testers = [element(2, prime_tester_server:start_link(T)) || _ <- lists:seq(1, PoolSize)],
+    % Initialize load counters for each test server
+    lists:foreach(fun(Tester) -> ets:insert(T, {Tester, 0}) end, Testers),
+    {ok, #state{work = T}}.
 
-handle_call({is_prime, N}, From, State=#state{ tester_load = Load }) ->
-    Tester = lowest_load(Load),
-    prime_tester_server:is_prime(Tester, N, From),
-    {noreply, State#state{ tester_load = increase_load(Tester, Load) }}.
+handle_call({is_prime, N}, From, State=#state{ work = Work, next_job = JobId }) ->
+    Tester = lowest_load(Work),
+    ets:insert(Work, {JobId, N, From, Tester}),
+    prime_tester_server:is_prime(Tester, JobId),
+    increase_load(Tester, Work),
+    {noreply, State#state{next_job = JobId + 1}}.
 
-handle_cast({work_done, Tester}, #state{tester_load=Load}) ->
-    {noreply, #state{tester_load=reduce_load(Tester, Load)}};
-handle_cast(Request, _State) ->
-    logger:warning("Unexpected cast: ~p", [Request]).
+handle_cast(Request, State) ->
+    logger:warning("Unexpected cast: ~p", [Request]),
+    {noreply, State}.
 
 handle_info(Info, State) ->
     logger:warning("Unnexpected info: ~p", [Info]),
@@ -44,13 +56,17 @@ terminate(_, _) ->
 code_change(_, _, State) ->
     {ok, State}.
 
-update_load(Tester, Load, Increment) ->
-    {value, {_, L}, Load2} = lists:keytake(Tester, 1, Load),
-    lists:keysort(2, [{Tester, L + Increment}|Load2]).
+decrease_load(Tester, Work) ->
+    ets:update_counter(Work, Tester, -1).
+increase_load(Tester, Work) ->
+    ets:update_counter(Work, Tester, 1).
 
-reduce_load(Tester, Load) ->
-    update_load(Tester, Load, -1).
-increase_load(Tester, Load) ->
-    update_load(Tester, Load, +1).
+lowest_load(Work) ->
+    element(1, keymin(2, ets:select(Work, [{{'$1', '_'}, [{is_pid, '$1'}], ['$_']}]))).
 
-lowest_load([{T, _}|_]) -> T.
+keymin(K, [Y|List]) ->
+    lists:foldl(fun(X, Acc) ->
+                        if element(K, X) < element(K, Acc) -> X;
+                           true -> Acc
+                        end
+                end, Y, List).

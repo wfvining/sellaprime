@@ -1,4 +1,4 @@
-%%%-------------------------------------------------------------------
+ %%%-------------------------------------------------------------------
 %%% @author Will Vining <wfvining@alazani>
 %%% @copyright (C) 2022, Will Vining
 %%% @doc
@@ -11,13 +11,15 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, is_prime/3]).
+-export([start_link/1, is_prime/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3, format_status/2]).
 
--record(state, {queue = queue:new(), worker :: pid()}).
+-record(state, {queue = queue:new(),
+                work_table :: ets:tid(),
+                worker :: pid()}).
 
 %%%===================================================================
 %%% API
@@ -28,16 +30,16 @@
 %% Starts the server
 %% @end
 %%--------------------------------------------------------------------
--spec start_link() -> {ok, Pid :: pid()} |
+-spec start_link(WorkTable :: ets:tid()) -> {ok, Pid :: pid()} |
           {error, Error :: {already_started, pid()}} |
           {error, Error :: term()} |
           ignore.
-start_link() ->
-    gen_server:start_link(?MODULE, [], []).
+start_link(WorkTable) ->
+    gen_server:start_link(?MODULE, WorkTable, []).
 
--spec is_prime(S :: pid(), N :: pos_integer(), From :: term()) -> ok.
-is_prime(S, N, From) ->
-    gen_server:cast(S, {is_prime, {N, From}}).
+-spec is_prime(S :: pid(), JobId :: pos_integer()) -> ok.
+is_prime(S, JobId) ->
+    gen_server:cast(S, {is_prime, JobId}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -54,10 +56,11 @@ is_prime(S, N, From) ->
           {ok, State :: term(), hibernate} |
           {stop, Reason :: term()} |
           ignore.
-init([]) ->
+init(WorkTable) ->
     process_flag(trap_exit, true),
     Self = self(),
-    {ok, #state{worker = spawn_link(fun() -> worker(Self) end)}}.
+    {ok, #state{work_table = WorkTable,
+                worker = spawn_link(fun() -> worker(Self, WorkTable) end)}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -96,8 +99,10 @@ handle_call(Request, _From, State) ->
           {noreply, NewState :: term(), Timeout :: timeout()} |
           {noreply, NewState :: term(), hibernate} |
           {stop, Reason :: term(), NewState :: term()}.
-handle_cast(work_done, State=#state{queue=Q}) ->
-    {noreply, State#state{queue=queue:drop(Q)}};
+handle_cast(work_done, State=#state{queue = Q, work_table = WorkTable}) ->
+    {{value, Request}, NewQ} = queue:out(Q),
+    isaprime:work_done(WorkTable, Request),
+    {noreply, State#state{queue = NewQ}};
 handle_cast({is_prime, Request}, State=#state{queue=Q, worker=W}) ->
     case queue:is_empty(Q) of
         true -> alert_worker(W);
@@ -170,28 +175,28 @@ get_work(Server) ->
     gen_server:call(Server, get_work).
 
 work_done(Server) ->
-    gen_server:cast(Server, work_done),
-    isaprime:work_done(Server).
+    gen_server:cast(Server, work_done).
 
 alert_worker(W) ->
     W ! work.
 
-worker(Server) ->
+worker(Server, WorkTable) ->
     receive
         work ->
-            do_work(Server),
-            worker(Server);
+            do_work(Server, WorkTable),
+            worker(Server, WorkTable);
         stop ->
             ok
     end.
 
-do_work(Server) ->
+do_work(Server, WorkTable) ->
     case get_work(Server) of
-        {work, {N, From}} ->
+        {work, JobId} ->
+            {N, From} = isaprime:get_job(WorkTable, JobId),
             IsPrime = lib_primes:is_prime(N),
             gen_server:reply(From, IsPrime),
             work_done(Server),
-            do_work(Server);
+            do_work(Server, WorkTable);
         no_work ->
             waiting
     end.
