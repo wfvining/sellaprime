@@ -54,8 +54,8 @@ start_link() ->
           ignore.
 init([]) ->
 
-    SupFlags = #{strategy => rest_for_one,
-                 intensity => 1,
+    SupFlags = #{strategy => one_for_one,
+                 intensity => 2,
                  period => 5},
 
     {ok, {SupFlags,

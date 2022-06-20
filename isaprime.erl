@@ -2,13 +2,13 @@
 
 -behaviour(gen_server).
 
--export([start_link/0, test/1, work_done/2, get_job/2, register_worker/0]).
+-export([start_link/0, test/1, work_done/1, get_job/1, register_worker/0]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3, handle_continue/2]).
 
 -define(SERVER, ?MODULE).
 
--record(state, {work, next_job = 1, monitors = #{}}).
+-record(state, {next_job = 1, monitors = #{}}).
 
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
@@ -16,42 +16,63 @@ start_link() ->
 test(N) ->
     gen_server:call(?SERVER, {is_prime, N}).
 
-work_done(WorkTable, JobId) ->
-    %% This could be a problem since it is not atomic, if the server
-    %% is killed externally then the load could be inconsistent.
-    ets:delete(WorkTable, JobId),
-    decrease_load(self(), WorkTable).
+work_done(JobId) ->
+    jobdb:job_done(JobId).
 
-get_job(WorkTable, JobId) ->
-    [{JobId, N, From, _}] = ets:lookup(WorkTable, JobId),
-    {N, From}.
+get_job(JobId) ->
+    jobdb:get_job(JobId).
 
 register_worker() ->
     gen_server:call(?SERVER, {register, self()}).
 
 init([]) ->
     %% Set up a table of work
-    T = ets:new(work, [set, public, {write_concurrency, true}]),  % only write concurrency since reads and writes are interleaved
-    {ok, #state{work = T}}.
+    case jobdb:start([node(), 'backup@alazani']) of
+        ok -> {ok, #state{}};
+        {error, already_up} -> {ok, #state{}, {continue, recover}}
+    end.
+
+handle_continue(recover, State = #state{ monitors = M }) ->
+    Testers = jobdb:testers(),
+    Monitors = lists:foldl(
+                 fun(Tester, Monitors) ->
+                         case is_process_alive(Tester) of
+                             true -> Monitors#{ erlang:monitor(process, Tester) => Tester };
+                             false -> recover_tester(Tester), Monitors
+                         end
+                 end, M, Testers),
+    %% TODO get the max job ID
+    {noreply, State#state{ monitors = Monitors }}.
 
 handle_call({register, Worker}, _From,
-            State = #state{ work = Work, monitors = Monitors }) ->
+            State = #state{ monitors = Monitors }) ->
     Ref = erlang:monitor(process, Worker),
-    ets:insert(Work, {Worker, 0}),
-    {reply, Work, State#state{ monitors = Monitors#{ Ref => Worker }}};
-handle_call({is_prime, N}, From, State=#state{ work = Work, next_job = JobId }) ->
-    assign_work(JobId, N, From, Work),
+    jobdb:init_load(Worker),
+    {reply, ok, State#state{ monitors = Monitors#{ Ref => Worker }}};
+handle_call({is_prime, N}, From, State=#state{ next_job = JobId }) ->
+    assign_job(JobId, N, From),
     {noreply, State#state{next_job = JobId + 1}}.
 
 handle_cast(Request, State) ->
     logger:warning("Unexpected cast: ~p", [Request]),
     {noreply, State}.
 
+handle_info({reassign, JobId, N, From}, State) ->
+    assign_job(JobId, N, From),
+    {noreply, State};
+handle_info({recover_tester, Tester, Attempt}, State=#state{ monitors = #{} })
+  when Attempt =< 3 ->
+    %% If no testers have been registered. Wait and try again.
+    timer:send_after(10 * Attempt, {recover_tester, Tester, Attempt + 1}),
+    {noreply, State};
+handle_info({recover_tester, Tester, _}, State) ->
+    redistribute_jobs(Tester),
+    {noreply, State};
 handle_info({'DOWN', Ref, process, _, _},
-            State = #state{ monitors = Monitors, work = Work}) ->
+            State = #state{ monitors = Monitors}) ->
     {Tester, NewMonitors} = maps:take(Ref, Monitors),
     %% Distribute the work to other workers
-    redistribute_work(Tester, Work),
+    redistribute_jobs(Tester),
     {noreply, State#state{monitors = NewMonitors}};
 handle_info(Info, State) ->
     logger:warning("Unnexpected info: ~p", [Info]),
@@ -63,32 +84,21 @@ terminate(_, _) ->
 code_change(_, _, State) ->
     {ok, State}.
 
-redistribute_work(Tester, Work) ->
-    ets:delete(Work, Tester),
-    WorkToReassign = ets:select(Work, [{{'$1', '$2', '$3', '$4'},
-                                        [{'=:=', Tester, '$4'}],
-                                        [{{'$1', '$2', '$3'}}]}]),
-    lists:foreach(fun({JobId, N, From}) ->
-                          assign_work(JobId, N, From, Work)
-                  end, WorkToReassign).
+redistribute_jobs(Tester) ->
+    jobdb:delete_load(Tester),
+    Jobs = jobdb:jobs(Tester),
+    lists:foreach(
+      fun([JobId, N, From]) ->
+              %% reassign asynchronously, one at a time, to allow for
+              %% a new tester (or testers) to come up. Otherwise we
+              %% could end up with a huge load imbalance.
+              self() ! {reassign, JobId, N, From}
+      end,
+      Jobs).
 
-assign_work(JobId, N, From, Work) ->
-    Tester = lowest_load(Work),
-    ets:insert(Work, {JobId, N, From, Tester}),
-    prime_tester_server:is_prime(Tester, JobId),
-    increase_load(Tester, Work).
+assign_job(JobId, N, From) ->
+    Tester = jobdb:assign_job(JobId, N, From),
+    prime_tester_server:is_prime(Tester, JobId).
 
-decrease_load(Tester, Work) ->
-    ets:update_counter(Work, Tester, -1).
-increase_load(Tester, Work) ->
-    ets:update_counter(Work, Tester, 1).
-
-lowest_load(Work) ->
-    element(1, keymin(2, ets:select(Work, [{{'$1', '_'}, [{is_pid, '$1'}], ['$_']}]))).
-
-keymin(K, [Y|List]) ->
-    lists:foldl(fun(X, Acc) ->
-                        if element(K, X) < element(K, Acc) -> X;
-                           true -> Acc
-                        end
-                end, Y, List).
+recover_tester(Tester) ->
+    self() ! {recover_tester, Tester, 0}.

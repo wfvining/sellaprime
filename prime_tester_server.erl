@@ -18,7 +18,6 @@
          terminate/2, code_change/3, format_status/2]).
 
 -record(state, {queue = queue:new(),
-                work_table :: ets:tid(),
                 worker :: pid()}).
 
 %%%===================================================================
@@ -57,10 +56,9 @@ is_prime(S, JobId) ->
           {stop, Reason :: term()} |
           ignore.
 init([]) ->
-    WorkTable = isaprime:register_worker(),
+    isaprime:register_worker(),
     Self = self(),
-    {ok, #state{work_table = WorkTable,
-                worker = spawn_link(fun() -> worker(Self, WorkTable) end)}}.
+    {ok, #state{worker = spawn_link(fun() -> worker(Self) end)}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -99,9 +97,9 @@ handle_call(Request, _From, State) ->
           {noreply, NewState :: term(), Timeout :: timeout()} |
           {noreply, NewState :: term(), hibernate} |
           {stop, Reason :: term(), NewState :: term()}.
-handle_cast(work_done, State=#state{queue = Q, work_table = WorkTable}) ->
+handle_cast(work_done, State=#state{queue = Q}) ->
     {{value, Request}, NewQ} = queue:out(Q),
-    isaprime:work_done(WorkTable, Request),
+    isaprime:work_done(Request),
     {noreply, State#state{queue = NewQ}};
 handle_cast({is_prime, Request}, State=#state{queue=Q, worker=W}) ->
     case queue:is_empty(Q) of
@@ -180,23 +178,23 @@ work_done(Server) ->
 alert_worker(W) ->
     W ! work.
 
-worker(Server, WorkTable) ->
+worker(Server) ->
     receive
         work ->
-            do_work(Server, WorkTable),
-            worker(Server, WorkTable);
+            do_work(Server),
+            worker(Server);
         stop ->
             ok
     end.
 
-do_work(Server, WorkTable) ->
+do_work(Server) ->
     case get_work(Server) of
         {work, JobId} ->
-            {N, From} = isaprime:get_job(WorkTable, JobId),
+            {N, From} = isaprime:get_job(JobId),
             IsPrime = lib_primes:is_prime(N),
             gen_server:reply(From, IsPrime),
             work_done(Server),
-            do_work(Server, WorkTable);
+            do_work(Server);
         no_work ->
             waiting
     end.

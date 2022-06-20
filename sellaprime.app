@@ -5,9 +5,9 @@
   {vsn, "1.0"},
   {modules, [sellaprime_app, sellaprime_supervisor, area_server,
              prime_server, prime_tester_server, isaprime, lib_lin,
-             lib_primes, my_alarm_handler]},
+             lib_primes, my_alarm_handler, jobdb]},
   {registered,[area_server, prime_server, sellaprime_super, isaprime]},
-  {applications, [kernel,stdlib]},
+  {applications, [kernel,stdlib,mnesia]},
   {mod, {sellaprime_app,[]}},
   {start_phases, []}
  ]}.
