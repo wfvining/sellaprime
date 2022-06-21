@@ -192,7 +192,7 @@ do_work(Server) ->
         {work, JobId} ->
             {N, From} = isaprime:get_job(JobId),
             IsPrime = lib_primes:is_prime(N),
-            gen_server:reply(From, IsPrime),
+            isaprime:respond(From, IsPrime),
             work_done(Server),
             do_work(Server);
         no_work ->

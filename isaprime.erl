@@ -2,7 +2,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/0, test/1, work_done/1, get_job/1, register_worker/0]).
+-export([start_link/0, test/1, work_done/1, get_job/1, register_worker/0, respond/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3, handle_continue/2]).
 
@@ -14,7 +14,20 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 test(N) ->
-    gen_server:call(?SERVER, {is_prime, N}).
+    Alias = alias(),
+    gen_server:cast(?SERVER, {is_prime, N, Alias}),
+    receive
+        IsPrime ->
+            unalias(Alias),
+            IsPrime
+    after
+        5000 ->
+            unalias(Alias),
+            error(timeout)
+    end.
+
+respond(To, Response) ->
+    To ! Response.
 
 work_done(JobId) ->
     jobdb:job_done(JobId).
@@ -48,11 +61,11 @@ handle_call({register, Worker}, _From,
             State = #state{ monitors = Monitors }) ->
     Ref = erlang:monitor(process, Worker),
     jobdb:init_load(Worker),
-    {reply, ok, State#state{ monitors = Monitors#{ Ref => Worker }}};
-handle_call({is_prime, N}, From, State=#state{ next_job = JobId }) ->
-    assign_job(JobId, N, From),
-    {noreply, State#state{next_job = JobId + 1}}.
+    {reply, ok, State#state{ monitors = Monitors#{ Ref => Worker }}}.
 
+handle_cast({is_prime, N, From}, State=#state{ next_job = JobId }) ->
+    assign_job(JobId, N, From),
+    {noreply, State#state{ next_job = JobId + 1 }};
 handle_cast(Request, State) ->
     logger:warning("Unexpected cast: ~p", [Request]),
     {noreply, State}.
