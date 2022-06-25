@@ -7,15 +7,15 @@
 -record(load, {tester, jobs}).
 
 initialize(Nodes) ->
-    mnesia:create_schema(Nodes),
-    mnesia:start(),
+    ok = mnesia:create_schema(Nodes),
+    rpc:multicall(Nodes, application, start, [mnesia]),
     mnesia:create_table(job, [{attributes, record_info(fields, job)},
                               {ram_copies, Nodes}]),
     mnesia:create_table(load, [{attributes, record_info(fields, load)},
-                               {ram_copies, Nodes}]).
+                               {ram_copies, Nodes}]),
+    rpc:multicall(Nodes, application, stop, [mnesia]).
 
 start(Nodes) ->
-    initialize(Nodes),
     mnesia:wait_for_tables([job, load], 10000),
     NumWorkers = mnesia:table_info(load, size),
     if

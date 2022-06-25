@@ -10,7 +10,15 @@
 -behaviour(application).
 -export([start/2, stop/1]).
 start(_Type, StartArgs) ->
-    sellaprime_supervisor:start_link(StartArgs).
+    PrimaryNode = proplists:get_value(primary, StartArgs),
+    BackupNode = proplists:get_value(backup, StartArgs),
+    if
+        PrimaryNode =:= node() ->
+            rpc:call(BackupNode, application, start, [sellaprime]),
+            sellaprime_supervisor:start_link(StartArgs);
+        true ->
+            sellaprime_supervisor:start_link(StartArgs)
+    end.
 stop(_State) ->
     ok.
 

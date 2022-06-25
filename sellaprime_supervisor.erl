@@ -8,7 +8,27 @@
 %%---
 -module(sellaprime_supervisor).
 -behaviour(supervisor). % see erl -man supervisor
--export([start/0, start_in_shell_for_testing/0, start_link/1, init/1]).
+-export([start/0, recover/0, start_in_shell_for_testing/0, start_link/1, init/1]).
+
+-define(SELLAPRIME_CHILDREN,
+        [{area_server,
+          {area_server, start_link, []},
+          permanent,
+          10000,
+          worker,
+          [area_server]},
+         {prime_server,
+          {prime_server, start_link, []},
+          permanent,
+          10000,
+          worker,
+          [prime_server]},
+         {primetest_sup,
+          {primetest_sup, start_link, []},
+          permanent,
+          1000,
+          supervisor,
+          [primetest_sup]}]).
 
 start() ->
     spawn(fun() ->
@@ -19,31 +39,30 @@ start_in_shell_for_testing() ->
     unlink(Pid).
 start_link(Args) ->
     supervisor:start_link({local,?MODULE}, ?MODULE, Args).
-init([]) ->
+init(Nodes) ->
     %% Install my personal error handler
      gen_event:swap_handler(alarm_handler,
                                    {alarm_handler, swap},
                    {my_alarm_handler, xyz}),
-    {ok, {{one_for_one, 5, 10},
-      [{area_server,
-        {area_server, start_link, []},
-        permanent,
-        10000,
-        worker,
-        [area_server]},
-       {prime_server,
-        {prime_server, start_link, []},
-        permanent,
-        10000,
-        worker,
-        [prime_server]},
-       {primetest_sup,
-        {primetest_sup, start_link, []},
-        permanent,
-        1000,
-        supervisor,
-        [primetest_sup]}
-      ]}}.
+    PrimaryNode = proplists:get_value(primary, Nodes),
+    BackupNode = proplists:get_value(backup, Nodes),
+    SupSpec = {one_for_one, 5, 10},
+    ChildSpecs = if node() =:= PrimaryNode ->
+                         ?SELLAPRIME_CHILDREN;
+                    node() =:= BackupNode ->
+                         [{watchdog,
+                           {watchdog_server, start_link, [PrimaryNode]},
+                           transient,
+                           10000,
+                           worker,
+                           [watchdog_server]}]
+                 end,
+    {ok, {SupSpec, ChildSpecs}}.
+
+recover() ->
+    lists:foreach(
+      fun(ChildSpec) -> supervisor:start_child(?MODULE, ChildSpec) end,
+      ?SELLAPRIME_CHILDREN).
 
 %% When the supervisor is started, it calls init(Arg).
 %% This function should return {ok, {SupFlags, Children}}.

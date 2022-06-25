@@ -8,6 +8,6 @@
              lib_primes, my_alarm_handler, jobdb]},
   {registered,[area_server, prime_server, sellaprime_super, isaprime]},
   {applications, [kernel,stdlib,mnesia]},
-  {mod, {sellaprime_app,[]}},
+  {mod, {sellaprime_app,[{primary, primary@alazani}, {backup, backup@alazani}]}},
   {start_phases, []}
  ]}.
