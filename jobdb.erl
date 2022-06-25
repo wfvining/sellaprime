@@ -1,7 +1,7 @@
 -module(jobdb).
 
 -export([initialize/1, start/1]).
--export([job_done/1, get_job/1, assign_job/3, jobs/1, init_load/1, delete_load/1, testers/0]).
+-export([job_done/1, get_job/1, assign_job/3, jobs/1, init_load/1, delete_load/1, testers/0, reset/0]).
 
 -record(job, {id, n, from, tester}).
 -record(load, {tester, jobs}).
@@ -25,6 +25,9 @@ start(Nodes) ->
             {error, already_up}
     end.
 
+reset() ->
+    mnesia:clear_table(job),
+    mnesia:clear_table(load).
 
 jobs(Tester) ->
     mnesia:dirty_select(job, [{{job, '$1', '$2', '$3', '$4'},

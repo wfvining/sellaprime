@@ -60,6 +60,7 @@ init(Nodes) ->
     {ok, {SupSpec, ChildSpecs}}.
 
 recover() ->
+    jobdb:reset(),
     lists:foreach(
       fun(ChildSpec) -> supervisor:start_child(?MODULE, ChildSpec) end,
       ?SELLAPRIME_CHILDREN).
